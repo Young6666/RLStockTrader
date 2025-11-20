@@ -1,0 +1,7 @@
+gymnasium
+stable-baselines3[extra]
+yfinance
+pandas
+numpy
+matplotlib
+shimmy>=2.0.0
