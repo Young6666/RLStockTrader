@@ -1,3 +1,9 @@
+import argparse
+
+parser = argparse.ArgumentParser(description="parser for training")
+parser.add_argument('filename', type=str, help='exp name')
+args = parser.parse_args()
+
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stock_env import StockTradingEnv
@@ -35,7 +41,7 @@ def evaluate_model(model, ticker, start_date, end_date):
     return net_worth_history
 
 # 모델 로드 및 설정
-model_path = "models/ppo_stock_agent_smart"
+model_path = f"models/ppo_stock_agent_{args.filename}"
 if not os.path.exists(model_path + ".zip"):
     print("Error: 모델 파일이 없습니다.")
     exit()
@@ -81,5 +87,5 @@ plt.axhline(0, color='black', linestyle='--')
 plt.grid(True)
 
 plt.tight_layout()
-plt.savefig("evaluation_result.png")
+plt.savefig(f"evaluation_result_{args.filename}.png")
 print("\nEvaluation graph saved.")

@@ -1,3 +1,9 @@
+import argparse
+
+parser = argparse.ArgumentParser(description="parser for training")
+parser.add_argument('filename', type=str, help='exp name')
+args = parser.parse_args()
+
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stock_env import StockTradingEnv
@@ -19,5 +25,5 @@ model.learn(total_timesteps=100000) # 10만 번 학습
 print("Training Finished!")
 
 os.makedirs("models", exist_ok=True)
-model.save("models/ppo_stock_agent_smart")
-print("Smart Model Saved.")
+model.save(f"models/ppo_stock_agent_{args.filename}")
+print("Model Saved.")
