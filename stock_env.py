@@ -5,75 +5,108 @@ import pandas as pd
 import yfinance as yf
 
 class StockTradingEnv(gym.Env):
-    def __init__(self, ticker='AAPL', start_date='2020-01-01', end_date='2023-01-01', initial_balance=10000):
+    def __init__(self, ticker='AAPL', start_date='2018-01-01', end_date='2022-01-01', initial_balance=10000):
         super(StockTradingEnv, self).__init__()
         
-        # 1. 데이터 로드 (yfinance 권장 사항 반영 [cite: 17])
-        self.df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        self.df = self.df.reset_index()
+        # 1. 데이터 다운로드 및 전처리
+        print(f"Loading data for {ticker}...")
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        self.df = df.reset_index()
+
+        if len(self.df) < 60:
+            raise ValueError("Data too short for technical indicators.")
+
+        # --- [핵심] 기술적 지표(Feature Engineering) 추가 ---
+        # 1. 이동평균선 (SMA) 20일, 60일
+        self.df['SMA_20'] = self.df['Close'].rolling(window=20).mean()
+        self.df['SMA_60'] = self.df['Close'].rolling(window=60).mean()
+        
+        # 2. RSI (상대강도지수) - 매수/매도 타이밍 핵심 지표
+        delta = self.df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        self.df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # 3. NaN 제거 (지표 계산 초기 구간)
+        self.df = self.df.dropna().reset_index(drop=True)
         
         self.initial_balance = initial_balance
+        self.action_space = spaces.Discrete(3) # 0: Hold, 1: Buy, 2: Sell
         
-        # 2. Action Space 정의 (예: 0=Hold, 1=Buy, 2=Sell) [cite: 11]
-        # 과제 초기 단계에서는 간단하게 1주씩 거래하거나 고정 수량을 거래하도록 설정 추천
-        self.action_space = spaces.Discrete(3)
-        
-        # 3. Observation Space 정의 [cite: 10, 21]
-        # 과제 예시처럼 Dict space 사용 [cite: 45]
-        self.observation_space = spaces.Dict({
-            "agent": spaces.Box(low=0, high=np.inf, shape=(2,), dtype=np.float32), # [잔고, 보유주식수]
-            "market": spaces.Box(low=0, high=np.inf, shape=(5,), dtype=np.float32) # [Open, High, Low, Close, Volume]
-        })
+        # Observation Space 수정: 의미 있는 지표만 전달
+        # [0: 보유현금비율, 1: 보유주식가치비율, 2: RSI, 3: 가격/SMA20(이격도), 4: 가격/SMA60]
+        self.observation_space = spaces.Box(low=0, high=np.inf, shape=(5,), dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
         self.current_step = 0
         self.balance = self.initial_balance
         self.shares_held = 0
         self.net_worth = self.initial_balance
-        
-        # 초기 상태 반환 [cite: 25]
+        self.max_net_worth = self.initial_balance
         return self._get_obs(), {}
 
     def _get_obs(self):
-        # 현재 단계의 시장 데이터 가져오기
-        current_price_data = self.df.iloc[self.current_step]
+        row = self.df.iloc[self.current_step]
         
-        market_obs = np.array([
-            current_price_data['Open'], current_price_data['High'], 
-            current_price_data['Low'], current_price_data['Close'], 
-            current_price_data['Volume']
-        ], dtype=np.float32)
+        # 데이터 정규화 (Normalization) - 아주 중요!
+        # 모든 값을 0~1 또는 비율(Ratio)로 변환하여 AI가 크기에 압도되지 않게 함
         
-        agent_obs = np.array([self.balance, self.shares_held], dtype=np.float32)
+        # 1. 자산 상태 비율
+        cash_ratio = self.balance / self.max_net_worth
+        stock_value = self.shares_held * row['Close']
+        stock_ratio = stock_value / self.max_net_worth
         
-        return {"agent": agent_obs, "market": market_obs}
+        # 2. 기술적 지표 (이미 비율이거나 0~100 사이 값)
+        rsi = row['RSI'] / 100.0  # 0~1 사이로 변환
+        sma20_ratio = row['Close'] / row['SMA_20'] # 1.0보다 크면 상승세
+        sma60_ratio = row['Close'] / row['SMA_60'] # 1.0보다 크면 장기 상승세
+        
+        obs = np.array([cash_ratio, stock_ratio, rsi, sma20_ratio, sma60_ratio], dtype=np.float32)
+        return obs
 
     def step(self, action):
-        # 현재 종가 가져오기
-        current_price = self.df.iloc[self.current_step]['Close']
+        row = self.df.iloc[self.current_step]
+        current_price = row['Close']
         
-        # 행동 수행 (로직 구현 필요) [cite: 31, 32]
-        # 예: 1주 매수/매도 로직
+        # 거래 로직 (보유 현금의 50% 매수 / 보유 주식의 50% 매도) - 분할 매매 도입
         if action == 1: # Buy
-            if self.balance >= current_price:
-                self.shares_held += 1
-                self.balance -= current_price
+            # 올인하지 않고 현금의 절반만 사용 (리스크 관리)
+            invest_amount = self.balance * 0.5
+            if invest_amount > current_price:
+                shares_bought = int(invest_amount / current_price)
+                self.shares_held += shares_bought
+                self.balance -= shares_bought * current_price
+                
         elif action == 2: # Sell
+            # 전량 매도 대신 절반 매도
             if self.shares_held > 0:
-                self.shares_held -= 1
-                self.balance += current_price
+                shares_sold = int(self.shares_held * 0.5)
+                # 최소 1주는 팔도록 보정
+                if shares_sold == 0 and self.shares_held > 0: 
+                    shares_sold = self.shares_held
+                
+                self.shares_held -= shares_sold
+                self.balance += shares_sold * current_price
         
-        # 다음 스텝으로 이동
         self.current_step += 1
-        done = self.current_step >= len(self.df) - 1
+        terminated = self.current_step >= len(self.df) - 1
+        truncated = False
         
-        # 보상 계산 (포트폴리오 가치 변화) [cite: 14]
+        # 보상 함수 개선 (Reward Shaping)
         prev_net_worth = self.net_worth
         self.net_worth = self.balance + (self.shares_held * current_price)
-        reward = self.net_worth - prev_net_worth # 수익이 나면 +보상
+        self.max_net_worth = max(self.max_net_worth, self.net_worth)
         
-        obs = self._get_obs()
+        # 기본 보상: 자산 변화량
+        reward = (self.net_worth - prev_net_worth)
         
-        return obs, reward, done, False, {'net_worth': self.net_worth}
+        # 페널티 추가: 하락장에서 주식을 들고만 있으면 페널티 강화
+        if action == 0 and self.net_worth < prev_net_worth:
+            reward -= 10 # 손해보고 있는데 가만히 있으면 추가 벌점
+
+        return self._get_obs(), reward, terminated, truncated, {'net_worth': self.net_worth}

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  rl-env:
+    build: .
+    container_name: stock_rl_container
+    volumes:
+      - .:/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '4gb' 
+    working_dir: /app
+    restart: unless-stopped
